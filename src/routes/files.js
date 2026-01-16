@@ -63,4 +63,10 @@ router.patch(
 // Delete file (soft delete)
 router.delete("/:id", filesController.deleteFile);
 
+// Get file versions
+router.get("/:id/versions", filesController.getVersions);
+
+// Revert to a previous version
+router.post("/:id/revert/:versionId", filesController.revertToVersion);
+
 module.exports = router;

@@ -585,14 +585,15 @@ const getRecent = async (req, res, next) => {
   }
 };
 
-// Get storage usage
+// Get storage usage with breakdown
 const getStorageUsage = async (req, res, next) => {
   try {
     const userId = req.user.id;
 
+    // Get files with breakdown by type
     const { data, error } = await supabase
       .from("files")
-      .select("size_bytes")
+      .select("size_bytes, mime_type")
       .eq("owner_id", userId)
       .eq("is_deleted", false);
 
@@ -604,10 +605,31 @@ const getStorageUsage = async (req, res, next) => {
       );
     }
 
-    const totalBytes = (data || []).reduce(
-      (sum, f) => sum + (f.size_bytes || 0),
-      0
-    );
+    // Calculate breakdown by type
+    const breakdown = {
+      images: 0,
+      videos: 0,
+      documents: 0,
+      audio: 0,
+      other: 0,
+    };
+
+    let totalBytes = 0;
+    for (const f of data || []) {
+      totalBytes += f.size_bytes || 0;
+      const mime = f.mime_type || "";
+      if (mime.startsWith("image/")) breakdown.images += f.size_bytes || 0;
+      else if (mime.startsWith("video/")) breakdown.videos += f.size_bytes || 0;
+      else if (mime.startsWith("audio/")) breakdown.audio += f.size_bytes || 0;
+      else if (
+        mime.includes("pdf") ||
+        mime.includes("document") ||
+        mime.includes("text")
+      )
+        breakdown.documents += f.size_bytes || 0;
+      else breakdown.other += f.size_bytes || 0;
+    }
+
     const fileCount = (data || []).length;
 
     // Get folder count
@@ -617,18 +639,169 @@ const getStorageUsage = async (req, res, next) => {
       .eq("owner_id", userId)
       .eq("is_deleted", false);
 
+    // Get trash size
+    const { data: trashData } = await supabase
+      .from("files")
+      .select("size_bytes")
+      .eq("owner_id", userId)
+      .eq("is_deleted", true);
+
+    const trashBytes = (trashData || []).reduce(
+      (sum, f) => sum + (f.size_bytes || 0),
+      0
+    );
+
+    const quotaBytes = 15 * 1024 * 1024 * 1024; // 15 GB default
+
     res.json({
       usage: {
         totalBytes,
         fileCount,
         folderCount: folderCount || 0,
-        // Placeholder for quota (can be implemented later)
-        quotaBytes: 15 * 1024 * 1024 * 1024, // 15 GB default
-        usagePercent: ((totalBytes / (15 * 1024 * 1024 * 1024)) * 100).toFixed(
-          2
-        ),
+        quotaBytes,
+        usagePercent: ((totalBytes / quotaBytes) * 100).toFixed(2),
+        trashBytes,
+        breakdown,
       },
     });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Get user activities
+const getActivities = async (req, res, next) => {
+  try {
+    const userId = req.user.id;
+    const limit = Math.min(parseInt(req.query.limit) || 50, 100);
+
+    const { data: activities, error } = await supabase
+      .from("activities")
+      .select("id, action, resource_type, resource_id, context, created_at")
+      .eq("actor_id", userId)
+      .order("created_at", { ascending: false })
+      .limit(limit);
+
+    if (error) {
+      throw new AppError(
+        "Failed to get activities",
+        500,
+        "GET_ACTIVITIES_FAILED"
+      );
+    }
+
+    res.json({ activities: activities || [] });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Get user's tags
+const getUserTags = async (req, res, next) => {
+  try {
+    const userId = req.user.id;
+
+    const { data: tags, error } = await supabase
+      .from("user_tags")
+      .select("id, name, color, created_at")
+      .eq("user_id", userId)
+      .order("name");
+
+    if (error) {
+      throw new AppError("Failed to get tags", 500, "GET_TAGS_FAILED");
+    }
+
+    res.json({ tags: tags || [] });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Create a new tag
+const createTag = async (req, res, next) => {
+  try {
+    const userId = req.user.id;
+    const { name, color } = req.body;
+
+    const { data: tag, error } = await supabase
+      .from("user_tags")
+      .insert({
+        user_id: userId,
+        name: name.trim(),
+        color: color || "#6366f1",
+      })
+      .select("id, name, color, created_at")
+      .single();
+
+    if (error) {
+      if (error.code === "23505") {
+        throw new AppError("Tag already exists", 400, "TAG_EXISTS");
+      }
+      throw new AppError("Failed to create tag", 500, "CREATE_TAG_FAILED");
+    }
+
+    res.status(201).json({ tag });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Delete a tag
+const deleteTag = async (req, res, next) => {
+  try {
+    const userId = req.user.id;
+    const { id } = req.params;
+
+    const { error } = await supabase
+      .from("user_tags")
+      .delete()
+      .eq("id", id)
+      .eq("user_id", userId);
+
+    if (error) {
+      throw new AppError("Failed to delete tag", 500, "DELETE_TAG_FAILED");
+    }
+
+    res.json({ message: "Tag deleted successfully" });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Update tags on a file or folder
+const updateResourceTags = async (req, res, next) => {
+  try {
+    const userId = req.user.id;
+    const { resourceType, resourceId, tags } = req.body;
+
+    const table = resourceType === "file" ? "files" : "folders";
+
+    // Verify ownership
+    const { data: resource, error: checkError } = await supabase
+      .from(table)
+      .select("id, owner_id")
+      .eq("id", resourceId)
+      .single();
+
+    if (checkError || !resource) {
+      throw new AppError("Resource not found", 404, "RESOURCE_NOT_FOUND");
+    }
+
+    if (resource.owner_id !== userId) {
+      throw new AppError("Permission denied", 403, "PERMISSION_DENIED");
+    }
+
+    // Update tags
+    const { error: updateError } = await supabase
+      .from(table)
+      .update({ tags })
+      .eq("id", resourceId);
+
+    if (updateError) {
+      throw new AppError("Failed to update tags", 500, "UPDATE_TAGS_FAILED");
+    }
+
+    res.json({ message: "Tags updated successfully", tags });
   } catch (error) {
     next(error);
   }
@@ -644,4 +817,9 @@ module.exports = {
   permanentDelete,
   getRecent,
   getStorageUsage,
+  getActivities,
+  getUserTags,
+  createTag,
+  deleteTag,
+  updateResourceTags,
 };

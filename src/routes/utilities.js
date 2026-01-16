@@ -16,6 +16,20 @@ const restoreSchema = z.object({
   resourceId: z.string().uuid(),
 });
 
+const tagSchema = z.object({
+  name: z.string().min(1).max(50),
+  color: z
+    .string()
+    .regex(/^#[0-9a-fA-F]{6}$/)
+    .optional(),
+});
+
+const updateTagsSchema = z.object({
+  resourceType: z.enum(["file", "folder"]),
+  resourceId: z.string().uuid(),
+  tags: z.array(z.string()).max(10),
+});
+
 // Validation middleware
 const validateBody = (schema) => {
   return (req, res, next) => {
@@ -69,5 +83,18 @@ router.get("/recent", utilitiesController.getRecent);
 
 // Storage usage
 router.get("/storage", utilitiesController.getStorageUsage);
+
+// Activity log
+router.get("/activities", utilitiesController.getActivities);
+
+// Tags
+router.get("/tags", utilitiesController.getUserTags);
+router.post("/tags", validateBody(tagSchema), utilitiesController.createTag);
+router.delete("/tags/:id", utilitiesController.deleteTag);
+router.put(
+  "/tags/resource",
+  validateBody(updateTagsSchema),
+  utilitiesController.updateResourceTags
+);
 
 module.exports = router;

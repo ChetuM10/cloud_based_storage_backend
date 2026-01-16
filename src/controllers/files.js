@@ -469,10 +469,150 @@ const deleteFile = async (req, res, next) => {
   }
 };
 
+// Get file versions
+const getVersions = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user.id;
+
+    // Check file exists and user has access
+    const { data: file, error } = await supabase
+      .from("files")
+      .select("id, owner_id, name")
+      .eq("id", id)
+      .single();
+
+    if (error || !file) {
+      throw new AppError("File not found", 404, "FILE_NOT_FOUND");
+    }
+
+    // Check permission
+    let hasAccess = file.owner_id === userId;
+    if (!hasAccess) {
+      const { data: share } = await supabase
+        .from("shares")
+        .select("role")
+        .eq("resource_type", "file")
+        .eq("resource_id", id)
+        .eq("grantee_user_id", userId)
+        .single();
+      hasAccess = !!share;
+    }
+
+    if (!hasAccess) {
+      throw new AppError("Access denied", 403, "ACCESS_DENIED");
+    }
+
+    // Get versions
+    const { data: versions, error: versionsError } = await supabase
+      .from("file_versions")
+      .select("id, version_number, size_bytes, checksum, created_at")
+      .eq("file_id", id)
+      .order("version_number", { ascending: false });
+
+    if (versionsError) {
+      throw new AppError("Failed to get versions", 500, "VERSIONS_FAILED");
+    }
+
+    res.json({
+      fileId: id,
+      fileName: file.name,
+      versions: versions || [],
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Revert to a previous version
+const revertToVersion = async (req, res, next) => {
+  try {
+    const { id, versionId } = req.params;
+    const userId = req.user.id;
+
+    // Check file exists and user owns it
+    const { data: file, error } = await supabase
+      .from("files")
+      .select("*")
+      .eq("id", id)
+      .eq("owner_id", userId)
+      .single();
+
+    if (error || !file) {
+      throw new AppError(
+        "File not found or access denied",
+        404,
+        "FILE_NOT_FOUND"
+      );
+    }
+
+    // Get the version to revert to
+    const { data: version, error: versionError } = await supabase
+      .from("file_versions")
+      .select("*")
+      .eq("id", versionId)
+      .eq("file_id", id)
+      .single();
+
+    if (versionError || !version) {
+      throw new AppError("Version not found", 404, "VERSION_NOT_FOUND");
+    }
+
+    // Create a new version from current file
+    const { data: latestVersion } = await supabase
+      .from("file_versions")
+      .select("version_number")
+      .eq("file_id", id)
+      .order("version_number", { ascending: false })
+      .limit(1)
+      .single();
+
+    const nextVersionNumber = (latestVersion?.version_number || 0) + 1;
+
+    // Save current as new version
+    await supabase.from("file_versions").insert({
+      file_id: id,
+      version_number: nextVersionNumber,
+      storage_key: file.storage_key,
+      size_bytes: file.size_bytes,
+      checksum: file.checksum,
+    });
+
+    // Update file to point to the reverted version's data
+    await supabase
+      .from("files")
+      .update({
+        storage_key: version.storage_key,
+        size_bytes: version.size_bytes,
+        checksum: version.checksum,
+        current_version_id: version.id,
+      })
+      .eq("id", id);
+
+    // Log activity
+    await supabase.from("activities").insert({
+      actor_id: userId,
+      action: "revert",
+      resource_type: "file",
+      resource_id: id,
+      context: { reverted_to_version: version.version_number },
+    });
+
+    res.json({
+      message: "File reverted successfully",
+      revertedToVersion: version.version_number,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   initUpload,
   completeUpload,
   getFile,
   updateFile,
   deleteFile,
+  getVersions,
+  revertToVersion,
 };

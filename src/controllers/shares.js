@@ -44,7 +44,11 @@ const createShare = async (req, res, next) => {
       .single();
 
     if (granteeError || !grantee) {
-      throw new AppError("User not found", 404, "USER_NOT_FOUND");
+      throw new AppError(
+        "User not found. They must sign up first before you can share with them.",
+        404,
+        "USER_NOT_FOUND"
+      );
     }
 
     // Can't share with yourself
